@@ -1,6 +1,6 @@
 services:
   abs-storygraph-sync:
-    build: .
+    image: ghcr.io/dukko/abs-storygraph-sync:latest
     restart: unless-stopped
     ports:
       - "8080:8080"
