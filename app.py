@@ -73,6 +73,8 @@ class StoryGraphSyncer:
     def login(self) -> bool:
         try:
             self.page.goto("https://app.thestorygraph.com/users/sign_in", wait_until="domcontentloaded")
+            logger.info("Login page URL: %s | title: %s", self.page.url, self.page.title())
+            logger.info("Page HTML snippet: %s", self.page.content()[:500])
             self.page.wait_for_selector("#user_email", timeout=15000)
             self.page.fill("#user_email", self.email)
             self.page.fill("#user_password", self.password)
