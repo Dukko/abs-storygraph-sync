@@ -2,16 +2,9 @@ services:
   abs-storygraph-sync:
     image: ghcr.io/dukko/abs-storygraph-sync:latest
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    network_mode: host
     environment:
-      ABS_URL: http://audiobookshelf:13378
+      ABS_URL: http://localhost:13378
       ABS_TOKEN: your_abs_api_token_here
       STORYGRAPH_EMAIL: your-email@example.com
       STORYGRAPH_PASSWORD: your-storygraph-password
-    networks:
-      - bridge
-
-networks:
-  bridge:
-    external: true
