@@ -49,7 +49,7 @@ docker compose up -d
 
 Then open **http://your-server:5465** to access the dashboard.
 
-> **Note:** The web UI has no authentication. Keep the port on your local network only — don't expose it to the internet.
+> **Note:** The web UI has **no authentication by default**. Keep the port on your local network only — don't expose it to the internet. To enable a login page, set `UI_USERNAME` and `UI_PASSWORD` (see Configuration below).
 
 ## Configuration
 
@@ -64,8 +64,8 @@ All environment variables:
 | `PORT` | `5465` | Port for the web UI |
 | `POLL_INTERVAL` | `600` | How often to check for new progress (seconds) |
 | `SYNC_THRESHOLD_MINUTES` | `5` | Minimum new minutes listened before triggering a sync |
-| `UI_PASSWORD` | *(unset)* | If set, enables HTTP Basic Auth on the web UI |
-| `UI_USERNAME` | `admin` | Username for Basic Auth (only used if `UI_PASSWORD` is set) |
+| `UI_PASSWORD` | *(unset)* | If set, enables a login page on the web UI |
+| `UI_USERNAME` | `admin` | Username for the login page (only used if `UI_PASSWORD` is set) |
 
 Credentials can also be updated at runtime via the web UI without restarting the container.
 
