@@ -69,6 +69,7 @@ _log_buffer = LogBuffer()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 logging.getLogger().addHandler(_log_buffer)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)  # suppress per-request access logs
 
 # ── ABS ───────────────────────────────────────────────────────────────────────
 
@@ -96,7 +97,6 @@ def get_abs_in_progress() -> list[dict]:
             "current_minutes": round((progress_data.get("currentTime") or 0) / 60, 1),
             "duration_minutes": round((media.get("duration") or 0) / 60, 1),
         })
-    logger.info("Found %d in-progress audiobook(s) in ABS", len(books))
     return books
 
 # ── StoryGraph ────────────────────────────────────────────────────────────────
