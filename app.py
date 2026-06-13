@@ -325,8 +325,14 @@ def check_auth():
     password = os.environ.get("UI_PASSWORD")
     if not password:
         return  # auth disabled — UI_PASSWORD not set
+    username = os.environ.get("UI_USERNAME", "admin")
     auth = request.authorization
-    if not auth or not hmac.compare_digest(auth.password or "", password):
+    ok = (
+        auth is not None
+        and hmac.compare_digest(auth.username or "", username)
+        and hmac.compare_digest(auth.password or "", password)
+    )
+    if not ok:
         return Response(
             "Authentication required.",
             401,

@@ -12,5 +12,6 @@ services:
       # Get these from browser DevTools → Application → Cookies → app.thestorygraph.com
       STORYGRAPH_SESSION: your_storygraph_session_cookie_here
       STORYGRAPH_REMEMBER_TOKEN: your_remember_user_token_here
-      # Optional: enable HTTP Basic Auth on the web UI (any username, this password)
+      # Optional: enable HTTP Basic Auth on the web UI
+      # UI_USERNAME: admin        # defaults to "admin" if omitted
       # UI_PASSWORD: your_password_here
