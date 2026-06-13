@@ -228,6 +228,16 @@ def _check_config():
     return [v for v in ("ABS_URL", "ABS_TOKEN", "STORYGRAPH_SESSION") if not os.environ.get(v)]
 
 
+@app.route("/debug-abs")
+def debug_abs():
+    """Return raw ABS API response for inspection."""
+    if not all([ABS_URL, ABS_TOKEN]):
+        return jsonify({"error": "ABS_URL or ABS_TOKEN not set"}), 500
+    headers = {"Authorization": f"Bearer {ABS_TOKEN}"}
+    resp = req.get(f"{ABS_URL}/api/me/items-in-progress", headers=headers, timeout=10)
+    return jsonify(resp.json())
+
+
 @app.route("/")
 def home():
     with _last_synced_lock:
