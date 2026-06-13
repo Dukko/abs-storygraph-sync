@@ -3,9 +3,11 @@ services:
     image: ghcr.io/dukko/abs-storygraph-sync:latest
     restart: unless-stopped
     network_mode: host
+    volumes:
+      - ./data:/app/data  # persists settings saved via the web UI
     environment:
       ABS_URL: http://localhost:13378
       ABS_TOKEN: your_abs_api_token_here
-      # Get these from your browser's DevTools → Application → Cookies → app.thestorygraph.com
+      # Get these from browser DevTools → Application → Cookies → app.thestorygraph.com
       STORYGRAPH_SESSION: your_storygraph_session_cookie_here
-      STORYGRAPH_REMEMBER_TOKEN: your_remember_user_token_here  # optional but extends session life
+      STORYGRAPH_REMEMBER_TOKEN: your_remember_user_token_here
