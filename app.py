@@ -72,14 +72,15 @@ class StoryGraphSyncer:
     def init_driver(self):
         opts = Options()
         opts.binary_location = "/usr/bin/chromium"
-        opts.add_argument("--headless=new")
+        opts.add_argument("--headless")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--disable-setuid-sandbox")
         opts.add_argument("--disable-extensions")
+        opts.add_argument("--no-zygote")
+        opts.add_argument("--single-process")
         opts.add_argument("--window-size=1280,900")
-        opts.add_argument("--remote-debugging-port=0")
         service = Service("/usr/bin/chromedriver")
         self.driver = webdriver.Chrome(service=service, options=opts)
         logger.info("Chrome driver initialized")
