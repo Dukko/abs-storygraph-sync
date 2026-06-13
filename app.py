@@ -2,12 +2,17 @@
 ABS to StoryGraph Sync Service
 Syncs audiobook listening progress from Audiobookshelf to StoryGraph
 using direct HTTP requests with session cookies (no browser required).
+
+Auto-syncs in the background whenever any book gains 5+ minutes of
+listening time since the last sync.
 """
 
 from flask import Flask, jsonify
 import os
 import re
 import logging
+import threading
+import time
 import requests as req
 from datetime import datetime
 
@@ -21,7 +26,16 @@ ABS_TOKEN = os.environ.get("ABS_TOKEN")
 STORYGRAPH_SESSION = os.environ.get("STORYGRAPH_SESSION")
 STORYGRAPH_REMEMBER_TOKEN = os.environ.get("STORYGRAPH_REMEMBER_TOKEN", "")
 
+# How often to poll ABS (seconds)
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 120))
+# Minimum new listening time (minutes) before triggering a sync
+SYNC_THRESHOLD_MINUTES = float(os.environ.get("SYNC_THRESHOLD_MINUTES", 5))
+
 STORYGRAPH_BASE = "https://app.thestorygraph.com"
+
+# In-memory store: title → minutes at last sync
+_last_synced: dict[str, float] = {}
+_last_synced_lock = threading.Lock()
 
 
 def get_abs_in_progress():
@@ -48,7 +62,6 @@ def get_abs_in_progress():
             "duration_minutes": round((media.get("duration") or 0) / 60, 1),
         })
 
-    logger.info("Found %d in-progress audiobook(s) in ABS", len(books))
     return books
 
 
@@ -84,7 +97,6 @@ class StoryGraphClient:
         resp = self._session.get(f"{STORYGRAPH_BASE}{path}", timeout=15)
         self._extract_csrf(resp.text)
         if "_storygraph_session" in resp.cookies:
-            logger.info("Session cookie refreshed")
             self._session.cookies.set("_storygraph_session", resp.cookies["_storygraph_session"], domain="app.thestorygraph.com")
         return resp
 
@@ -103,12 +115,10 @@ class StoryGraphClient:
         )
 
     def check_auth(self):
-        """Return True if session cookies are valid."""
         resp = self._get("/")
         return "sign_in" not in resp.url
 
     def search_book(self, title, author):
-        """Return StoryGraph book_id for the best search match, or None."""
         query = req.utils.quote(f"{title} {author}".strip())
         resp = self._get(f"/browse?search_term={query}")
         if resp.status_code != 200:
@@ -123,32 +133,25 @@ class StoryGraphClient:
         return None
 
     def ensure_currently_reading(self, book_id):
-        """Set book to 'currently reading' if it isn't already."""
         resp = self._get(f"/books/{book_id}")
         status_match = re.search(r'class="read-status-label"[^>]*>([^<]+)<', resp.text)
         status = status_match.group(1).strip().lower() if status_match else ""
-
         if "currently reading" in status or "rereading" in status:
-            logger.info("Book %s already currently reading", book_id)
             return True
-
         update_resp = self._post(
             f"/update-status.js?book_id={book_id}&status=currently-reading",
             {"authenticity_token": self._last_csrf},
         )
-        ok = update_resp.status_code in (200, 302)
         logger.info("Set currently-reading for %s: HTTP %s", book_id, update_resp.status_code)
-        return ok
+        return update_resp.status_code in (200, 302)
 
     def update_progress(self, book_id, progress_percent):
-        """POST progress percentage to StoryGraph."""
         resp = self._get(f"/books/{book_id}")
         pages_match = re.search(
             r'(?:name="read_status\[book_num_of_pages\]"|class="read-status-book-num-of-pages")[^>]*value="([^"]*)"',
             resp.text,
         )
         book_pages = pages_match.group(1) if pages_match else "0"
-
         update_resp = self._post("/update-progress", {
             "read_status[progress_number]": str(round(progress_percent, 1)),
             "read_status[progress_type]": "percentage",
@@ -162,14 +165,81 @@ class StoryGraphClient:
         return ok
 
 
+def do_sync(books_to_sync: list[dict]) -> list[dict]:
+    """Sync a list of books to StoryGraph. Returns results list."""
+    client = StoryGraphClient(STORYGRAPH_SESSION, STORYGRAPH_REMEMBER_TOKEN)
+    if not client.check_auth():
+        logger.error("StoryGraph session invalid — update STORYGRAPH_SESSION cookie")
+        return []
+
+    results = []
+    for book in books_to_sync:
+        try:
+            book_id = client.search_book(book["title"], book["author"])
+            if not book_id:
+                results.append({"title": book["title"], "status": "not_found"})
+                continue
+            client.ensure_currently_reading(book_id)
+            success = client.update_progress(book_id, book["progress_percent"])
+            results.append({
+                "title": book["title"],
+                "status": "success" if success else "failed",
+                "progress_percent": book["progress_percent"],
+                "current_minutes": book["current_minutes"],
+            })
+        except Exception as e:
+            logger.error("Error syncing '%s': %s", book["title"], e)
+            results.append({"title": book["title"], "status": "error", "error": str(e)})
+    return results
+
+
+def _poll_loop():
+    """Background thread: poll ABS and sync books that gained 5+ minutes."""
+    logger.info("Auto-sync started: polling every %ds, threshold %.1f min", POLL_INTERVAL, SYNC_THRESHOLD_MINUTES)
+    while True:
+        time.sleep(POLL_INTERVAL)
+        if not all([ABS_URL, ABS_TOKEN, STORYGRAPH_SESSION]):
+            continue
+        try:
+            books = get_abs_in_progress()
+            to_sync = []
+            with _last_synced_lock:
+                for book in books:
+                    title = book["title"]
+                    prev = _last_synced.get(title, 0.0)
+                    gained = book["current_minutes"] - prev
+                    if gained >= SYNC_THRESHOLD_MINUTES:
+                        logger.info("'%s' gained %.1f min — queuing sync", title, gained)
+                        to_sync.append(book)
+
+            if to_sync:
+                results = do_sync(to_sync)
+                with _last_synced_lock:
+                    for book in to_sync:
+                        _last_synced[book["title"]] = book["current_minutes"]
+                synced = len([r for r in results if r["status"] == "success"])
+                logger.info("Auto-sync complete: %d/%d synced", synced, len(to_sync))
+
+        except Exception as e:
+            logger.error("Auto-sync poll error: %s", e)
+
+
 def _check_config():
-    return [v for v in ("ABS_URL", "ABS_TOKEN", "STORYGRAPH_SESSION")
-            if not os.environ.get(v)]
+    return [v for v in ("ABS_URL", "ABS_TOKEN", "STORYGRAPH_SESSION") if not os.environ.get(v)]
 
 
 @app.route("/")
 def home():
-    return jsonify({"status": "running", "service": "ABS-StoryGraph Sync", "timestamp": datetime.now().isoformat()})
+    with _last_synced_lock:
+        last = dict(_last_synced)
+    return jsonify({
+        "status": "running",
+        "service": "ABS-StoryGraph Sync",
+        "poll_interval_seconds": POLL_INTERVAL,
+        "sync_threshold_minutes": SYNC_THRESHOLD_MINUTES,
+        "last_synced": last,
+        "timestamp": datetime.now().isoformat(),
+    })
 
 
 @app.route("/sync", methods=["POST"])
@@ -183,30 +253,11 @@ def sync():
         if not books:
             return jsonify({"message": "No in-progress audiobooks found in ABS", "synced": 0})
 
-        client = StoryGraphClient(STORYGRAPH_SESSION, STORYGRAPH_REMEMBER_TOKEN)
+        results = do_sync(books)
 
-        if not client.check_auth():
-            return jsonify({"error": "StoryGraph session invalid — update STORYGRAPH_SESSION cookie"}), 401
-
-        results = []
-        for book in books:
-            try:
-                book_id = client.search_book(book["title"], book["author"])
-                if not book_id:
-                    results.append({"title": book["title"], "status": "not_found"})
-                    continue
-
-                client.ensure_currently_reading(book_id)
-                success = client.update_progress(book_id, book["progress_percent"])
-                results.append({
-                    "title": book["title"],
-                    "status": "success" if success else "failed",
-                    "progress_percent": book["progress_percent"],
-                    "current_minutes": book["current_minutes"],
-                })
-            except Exception as e:
-                logger.error("Error syncing '%s': %s", book["title"], e)
-                results.append({"title": book["title"], "status": "error", "error": str(e)})
+        with _last_synced_lock:
+            for book in books:
+                _last_synced[book["title"]] = book["current_minutes"]
 
         synced = len([r for r in results if r["status"] == "success"])
         return jsonify({
@@ -223,5 +274,11 @@ def sync():
 
 
 if __name__ == "__main__":
+    if all([ABS_URL, ABS_TOKEN, STORYGRAPH_SESSION]):
+        t = threading.Thread(target=_poll_loop, daemon=True)
+        t.start()
+    else:
+        logger.warning("Missing config — auto-sync disabled until env vars are set")
+
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
