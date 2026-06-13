@@ -64,7 +64,7 @@ def _save_sync_state(data: dict):
 with _synced_pct_lock:
     _synced_pct.update(_load_sync_state())
 
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 120))
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 600))
 SYNC_THRESHOLD = float(os.environ.get("SYNC_THRESHOLD_MINUTES", 5))
 STORYGRAPH_BASE = "https://app.thestorygraph.com"
 

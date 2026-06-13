@@ -62,7 +62,7 @@ All environment variables:
 | `STORYGRAPH_SESSION` | — | `_storygraph_session` cookie value |
 | `STORYGRAPH_REMEMBER_TOKEN` | — | `remember_user_token` cookie value |
 | `PORT` | `5465` | Port for the web UI |
-| `POLL_INTERVAL` | `120` | How often to check for new progress (seconds) |
+| `POLL_INTERVAL` | `600` | How often to check for new progress (seconds) |
 | `SYNC_THRESHOLD_MINUTES` | `5` | Minimum new minutes listened before triggering a sync |
 | `UI_PASSWORD` | *(unset)* | If set, enables HTTP Basic Auth on the web UI |
 | `UI_USERNAME` | `admin` | Username for Basic Auth (only used if `UI_PASSWORD` is set) |
