@@ -77,6 +77,8 @@ Credentials can also be updated at runtime via the web UI without restarting the
 
 StoryGraph has no public API — this tool uses session cookies to make the same requests the website does.
 
+> **⚠️ Fragility warning:** Because this tool reverse-engineers StoryGraph's internal, unpublished web endpoints, it is inherently brittle. Any change StoryGraph makes to their HTML structure, URL routes, CSRF handling, or cookie behaviour can break the sync without warning and with no recourse. There is no official API to fall back on.
+
 ## Session cookie expiry
 
 StoryGraph session cookies expire periodically. When the sync stops working, grab fresh cookies from your browser (step 2 above) and paste them into the **Settings** tab of the web UI.
