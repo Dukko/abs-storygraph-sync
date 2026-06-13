@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 import requests as req
+from bs4 import BeautifulSoup
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -132,11 +133,19 @@ class StoryGraphClient:
         if resp.status_code != 200:
             logger.warning("Search failed for '%s' (HTTP %s)", title, resp.status_code)
             return None
-        match = re.search(r'href=["\'](/books/([^/"\'?]+))["\']', resp.text)
-        if match:
-            book_id = match.group(2)
-            logger.info("Found book '%s' → id=%s", title, book_id)
-            return book_id
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Find the first book title link in search results
+        link = soup.find("a", class_="book-title-link")
+        if not link:
+            container = soup.find(class_="book-title-author-and-series")
+            if container:
+                link = container.find("a", href=re.compile(r"^/books/"))
+        if link:
+            m = re.search(r"/books/([^/?]+)", link.get("href", ""))
+            if m:
+                book_id = m.group(1)
+                logger.info("Found book '%s' -> id=%s", title, book_id)
+                return book_id
         logger.warning("No StoryGraph result for '%s'", title)
         return None
 
