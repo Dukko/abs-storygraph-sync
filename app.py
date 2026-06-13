@@ -75,7 +75,9 @@ class StoryGraphSyncer:
     def login(self) -> bool:
         try:
             self.page.goto("https://app.thestorygraph.com/users/sign_in", wait_until="domcontentloaded")
-            self.page.wait_for_selector("#user_email", timeout=15000)
+            # Allow time for Cloudflare JS challenge to auto-resolve
+            self.page.wait_for_timeout(8000)
+            self.page.wait_for_selector("#user_email", timeout=30000)
             self.page.fill("#user_email", self.email)
             self.page.fill("#user_password", self.password)
             self.page.click("[name='commit']")
