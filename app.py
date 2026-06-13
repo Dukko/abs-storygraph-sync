@@ -42,7 +42,6 @@ with _config_lock:
 
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 120))
 SYNC_THRESHOLD = float(os.environ.get("SYNC_THRESHOLD_MINUTES", 5))
-HISTORY_DAYS = int(os.environ.get("HISTORY_DAYS", 30))
 STORYGRAPH_BASE = "https://app.thestorygraph.com"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -73,59 +72,31 @@ logging.getLogger().addHandler(_log_buffer)
 
 # ── ABS ───────────────────────────────────────────────────────────────────────
 
-def get_abs_recent_books() -> list[dict]:
-    """Return all books with listening activity in the last HISTORY_DAYS days."""
+def get_abs_in_progress() -> list[dict]:
     headers = {"Authorization": f"Bearer {cfg('ABS_TOKEN')}"}
-    cutoff_ms = (time.time() - HISTORY_DAYS * 86400) * 1000
-
-    seen: dict[str, dict] = {}  # itemId -> {title, author}
-    page = 0
-    while True:
-        resp = req.get(
-            f"{cfg('ABS_URL')}/api/me/listening-sessions",
-            headers=headers,
-            params={"page": page, "itemsPerPage": 100},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        sessions = data.get("sessions", [])
-        if not sessions:
-            break
-
-        stop = False
-        for s in sessions:
-            if (s.get("startedAt") or 0) < cutoff_ms:
-                stop = True
-                break
-            item_id = s.get("libraryItemId")
-            if item_id and item_id not in seen:
-                seen[item_id] = {
-                    "title": (s.get("displayTitle") or "").strip(),
-                    "author": s.get("displayAuthor") or "",
-                }
-
-        if stop or page >= (data.get("numPages") or 1) - 1:
-            break
-        page += 1
-
+    resp = req.get(f"{cfg('ABS_URL')}/api/me/items-in-progress", headers=headers, timeout=10)
+    resp.raise_for_status()
     books = []
-    for item_id, info in seen.items():
-        if not info["title"]:
+    for item in resp.json().get("libraryItems", []):
+        media = item.get("media", {})
+        metadata = media.get("metadata", {})
+        title = metadata.get("title", "").strip()
+        if not title:
             continue
+        item_id = item.get("id", "")
         progress_data = {}
-        pr = req.get(f"{cfg('ABS_URL')}/api/me/progress/{item_id}", headers=headers, timeout=10)
-        if pr.status_code == 200:
-            progress_data = pr.json()
+        if item_id:
+            pr = req.get(f"{cfg('ABS_URL')}/api/me/progress/{item_id}", headers=headers, timeout=10)
+            if pr.status_code == 200:
+                progress_data = pr.json()
         books.append({
-            "title": info["title"],
-            "author": info["author"],
+            "title": title,
+            "author": metadata.get("authorName", ""),
             "progress_percent": round((progress_data.get("progress") or 0) * 100, 1),
             "current_minutes": round((progress_data.get("currentTime") or 0) / 60, 1),
-            "duration_minutes": round((progress_data.get("duration") or 0) / 60, 1),
+            "duration_minutes": round((media.get("duration") or 0) / 60, 1),
         })
-
-    logger.info("Found %d book(s) with activity in the last %d days", len(books), HISTORY_DAYS)
+    logger.info("Found %d in-progress audiobook(s) in ABS", len(books))
     return books
 
 # ── StoryGraph ────────────────────────────────────────────────────────────────
@@ -246,7 +217,7 @@ def get_cached_books() -> tuple[list[dict], bool]:
         if time.time() - _status_cache["ts"] < STATUS_CACHE_TTL:
             return _status_cache["books"], _status_cache["abs_ok"]
     try:
-        books = get_abs_recent_books()
+        books = get_abs_in_progress()
         with _status_cache_lock:
             _status_cache.update({"books": books, "abs_ok": True, "ts": time.time()})
         return books, True
@@ -287,7 +258,7 @@ def _poll_loop():
         if not all([cfg("ABS_URL"), cfg("ABS_TOKEN"), cfg("STORYGRAPH_SESSION")]):
             continue
         try:
-            books = get_abs_recent_books()
+            books = get_abs_in_progress()
             # update cache so UI shows fresh data after each poll
             with _status_cache_lock:
                 _status_cache.update({"books": books, "abs_ok": True, "ts": time.time()})
@@ -342,7 +313,7 @@ def api_sync():
     if missing:
         return jsonify({"error": f"Missing: {', '.join(missing)}"}), 500
     try:
-        books = get_abs_recent_books()
+        books = get_abs_in_progress()
         if not books:
             return jsonify({"message": "No books in progress", "synced": 0, "total": 0, "results": []})
         results = do_sync(books)
@@ -388,12 +359,7 @@ def api_settings_get():
 @app.route("/debug-abs")
 def debug_abs():
     headers = {"Authorization": f"Bearer {cfg('ABS_TOKEN')}"}
-    resp = req.get(
-        f"{cfg('ABS_URL')}/api/me/listening-sessions",
-        headers=headers,
-        params={"page": 0, "itemsPerPage": 10},
-        timeout=10,
-    )
+    resp = req.get(f"{cfg('ABS_URL')}/api/me/items-in-progress", headers=headers, timeout=10)
     return jsonify(resp.json())
 
 
