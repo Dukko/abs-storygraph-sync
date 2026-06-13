@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 
 DATA_DIR = "/app/data"
 CONFIG_FILE = f"{DATA_DIR}/config.json"
+SYNC_STATE_FILE = f"{DATA_DIR}/sync_state.json"
 _runtime_config: dict = {}
 _config_lock = threading.Lock()
 
@@ -39,6 +40,28 @@ def cfg(key: str, default: str = "") -> str:
 # Load file config on startup (overrides env vars)
 with _config_lock:
     _runtime_config.update(_load_file_config())
+
+# Tracks the last progress % successfully pushed to StoryGraph, persisted across restarts
+_synced_pct: dict[str, float] = {}
+_synced_pct_lock = threading.Lock()
+
+
+def _load_sync_state():
+    try:
+        with open(SYNC_STATE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_sync_state(data: dict):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(SYNC_STATE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+with _synced_pct_lock:
+    _synced_pct.update(_load_sync_state())
 
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 120))
 SYNC_THRESHOLD = float(os.environ.get("SYNC_THRESHOLD_MINUTES", 5))
@@ -233,16 +256,28 @@ def do_sync(books: list[dict]) -> list[dict]:
     results = []
     for book in books:
         try:
+            pct = book["progress_percent"]
+            with _synced_pct_lock:
+                prev_pct = _synced_pct.get(book["title"])
+            if prev_pct is not None and abs(pct - prev_pct) < 0.5:
+                logger.info("'%s' unchanged at %.1f%% — skipping", book["title"], pct)
+                results.append({"title": book["title"], "status": "unchanged", "progress_percent": pct})
+                continue
+
             book_id = client.search_book(book["title"], book["author"])
             if not book_id:
                 results.append({"title": book["title"], "status": "not_found"})
                 continue
             client.ensure_currently_reading(book_id)
-            ok = client.update_progress(book_id, book["progress_percent"])
+            ok = client.update_progress(book_id, pct)
+            if ok:
+                with _synced_pct_lock:
+                    _synced_pct[book["title"]] = pct
+                    _save_sync_state(dict(_synced_pct))
             results.append({
                 "title": book["title"],
                 "status": "success" if ok else "failed",
-                "progress_percent": book["progress_percent"],
+                "progress_percent": pct,
                 "current_minutes": book["current_minutes"],
             })
         except Exception as e:
