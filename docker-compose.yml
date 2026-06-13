@@ -6,5 +6,6 @@ services:
     environment:
       ABS_URL: http://localhost:13378
       ABS_TOKEN: your_abs_api_token_here
-      STORYGRAPH_EMAIL: your-email@example.com
-      STORYGRAPH_PASSWORD: your-storygraph-password
+      # Get these from your browser's DevTools → Application → Cookies → app.thestorygraph.com
+      STORYGRAPH_SESSION: your_storygraph_session_cookie_here
+      STORYGRAPH_REMEMBER_TOKEN: your_remember_user_token_here  # optional but extends session life

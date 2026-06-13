@@ -1,4 +1,2 @@
 flask==3.1.0
 requests==2.32.3
-playwright==1.49.1
-playwright-stealth==1.0.6
