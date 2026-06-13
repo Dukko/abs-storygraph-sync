@@ -6,6 +6,7 @@ services:
     volumes:
       - ./data:/app/data  # persists settings saved via the web UI
     environment:
+      PORT: "5465"
       ABS_URL: http://localhost:13378
       ABS_TOKEN: your_abs_api_token_here
       # Get these from browser DevTools → Application → Cookies → app.thestorygraph.com

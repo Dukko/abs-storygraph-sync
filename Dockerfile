@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY templates/ templates/
 
-ENV PORT=8080
-EXPOSE 8080
+ENV PORT=5465
+EXPOSE 5465
 
 CMD ["python", "app.py"]
