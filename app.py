@@ -48,11 +48,18 @@ def get_abs_in_progress():
     for item in resp.json().get("libraryItems", []):
         media = item.get("media", {})
         metadata = media.get("metadata", {})
-        progress_data = item.get("userMediaProgress", {})
 
         title = metadata.get("title", "").strip()
         if not title:
             continue
+
+        # Progress is not embedded — fetch it separately
+        item_id = item.get("id", "")
+        progress_data = {}
+        if item_id:
+            prog_resp = req.get(f"{ABS_URL}/api/me/progress/{item_id}", headers=headers, timeout=10)
+            if prog_resp.status_code == 200:
+                progress_data = prog_resp.json()
 
         books.append({
             "title": title,
@@ -62,6 +69,7 @@ def get_abs_in_progress():
             "duration_minutes": round((media.get("duration") or 0) / 60, 1),
         })
 
+    logger.info("Found %d in-progress audiobook(s) in ABS", len(books))
     return books
 
 
