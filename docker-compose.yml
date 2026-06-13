@@ -1,0 +1,18 @@
+services:
+  abs-storygraph-sync:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    # If ABS is running in the same Docker network, use its service name as ABS_URL.
+    # Otherwise set ABS_URL to your ABS host in .env (e.g. http://192.168.1.x:13378).
+    #
+    # To attach to an existing network where ABS lives:
+    # networks:
+    #   - audiobookshelf_default
+    #
+    # networks:
+    #   audiobookshelf_default:
+    #     external: true
