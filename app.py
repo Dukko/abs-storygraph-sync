@@ -2,7 +2,7 @@
 ABS to StoryGraph Sync Service
 """
 
-from flask import Flask, jsonify, request, render_template, Response
+from flask import Flask, jsonify, request, render_template, Response, session, redirect, url_for
 from urllib.parse import urlparse
 import os, re, json, logging, threading, time, hmac
 from collections import deque
@@ -67,6 +67,22 @@ with _synced_pct_lock:
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 600))
 SYNC_THRESHOLD = float(os.environ.get("SYNC_THRESHOLD_MINUTES", 5))
 STORYGRAPH_BASE = "https://app.thestorygraph.com"
+
+
+def _get_secret_key() -> bytes:
+    key_file = f"{DATA_DIR}/secret_key"
+    try:
+        with open(key_file, "rb") as f:
+            key = f.read()
+            if len(key) >= 32:
+                return key
+    except FileNotFoundError:
+        pass
+    key = os.urandom(32)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(key_file, "wb") as f:
+        f.write(key)
+    return key
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -318,31 +334,47 @@ def _poll_loop():
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
+app.secret_key = _get_secret_key()
 
 
 @app.before_request
 def check_auth():
-    password = os.environ.get("UI_PASSWORD")
-    if not password:
-        return  # auth disabled — UI_PASSWORD not set
-    username = os.environ.get("UI_USERNAME", "admin")
-    auth = request.authorization
-    ok = (
-        auth is not None
-        and hmac.compare_digest(auth.username or "", username)
-        and hmac.compare_digest(auth.password or "", password)
-    )
-    if not ok:
-        return Response(
-            "Authentication required.",
-            401,
-            {"WWW-Authenticate": 'Basic realm="ABS Sync"'},
+    if not os.environ.get("UI_PASSWORD"):
+        return  # auth disabled
+    if request.endpoint in ("login", "logout", "static"):
+        return
+    if not session.get("authenticated"):
+        return redirect(url_for("login"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not os.environ.get("UI_PASSWORD"):
+        return redirect(url_for("index"))
+    error = None
+    if request.method == "POST":
+        username = os.environ.get("UI_USERNAME", "admin")
+        password = os.environ.get("UI_PASSWORD")
+        ok = (
+            hmac.compare_digest(request.form.get("username", ""), username)
+            and hmac.compare_digest(request.form.get("password", ""), password)
         )
+        if ok:
+            session["authenticated"] = True
+            return redirect(url_for("index"))
+        error = "Invalid username or password."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", auth_enabled=bool(os.environ.get("UI_PASSWORD")))
 
 
 @app.route("/api/status")

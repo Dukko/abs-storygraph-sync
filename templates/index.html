@@ -397,10 +397,15 @@
     <div class="logo-icon">📚</div>
     ABS → StoryGraph
   </div>
-  <div class="pills">
-    <div class="pill"><div class="dot" id="d-abs"></div><span id="l-abs">ABS</span></div>
-    <div class="pill"><div class="dot" id="d-sg"></div><span id="l-sg">StoryGraph</span></div>
-    <div class="pill"><div class="dot ok" id="d-poll"></div><span id="l-poll">Auto-sync</span></div>
+  <div style="display:flex;align-items:center;gap:0.75rem">
+    <div class="pills">
+      <div class="pill"><div class="dot" id="d-abs"></div><span id="l-abs">ABS</span></div>
+      <div class="pill"><div class="dot" id="d-sg"></div><span id="l-sg">StoryGraph</span></div>
+      <div class="pill"><div class="dot ok" id="d-poll"></div><span id="l-poll">Auto-sync</span></div>
+    </div>
+    {% if auth_enabled %}
+    <a href="/logout" style="font-size:0.75rem;color:var(--text-dim);text-decoration:none;padding:0.25rem 0.6rem;border:1px solid var(--border);border-radius:6px;transition:color 0.15s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">Sign out</a>
+    {% endif %}
   </div>
 </header>
 
