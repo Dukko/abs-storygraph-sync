@@ -9,6 +9,7 @@ import logging
 import requests
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright_stealth import stealth_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -68,13 +69,12 @@ class StoryGraphSyncer:
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
         self.page = self._browser.new_page()
+        stealth_sync(self.page)
         logger.info("Playwright browser initialized")
 
     def login(self) -> bool:
         try:
             self.page.goto("https://app.thestorygraph.com/users/sign_in", wait_until="domcontentloaded")
-            logger.info("Login page URL: %s | title: %s", self.page.url, self.page.title())
-            logger.info("Page HTML snippet: %s", self.page.content()[:500])
             self.page.wait_for_selector("#user_email", timeout=15000)
             self.page.fill("#user_email", self.email)
             self.page.fill("#user_password", self.password)
