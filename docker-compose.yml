@@ -5,17 +5,13 @@ services:
     ports:
       - "8080:8080"
     environment:
-      ABS_URL: http://audiobookshelf:13378  # or http://<your-host-ip>:13378
+      ABS_URL: http://audiobookshelf:13378
       ABS_TOKEN: your_abs_api_token_here
       STORYGRAPH_EMAIL: your-email@example.com
       STORYGRAPH_PASSWORD: your-storygraph-password
-    # If ABS is running in the same Docker network, use its service name as ABS_URL.
-    # Otherwise set ABS_URL to your ABS host IP.
-    #
-    # To attach to an existing network where ABS lives:
-    # networks:
-    #   - audiobookshelf_default
-    #
-    # networks:
-    #   audiobookshelf_default:
-    #     external: true
+    networks:
+      - bridge
+
+networks:
+  bridge:
+    external: true
