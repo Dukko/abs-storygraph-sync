@@ -64,6 +64,7 @@ All environment variables:
 | `PORT` | `5465` | Port for the web UI |
 | `POLL_INTERVAL` | `120` | How often to check for new progress (seconds) |
 | `SYNC_THRESHOLD_MINUTES` | `5` | Minimum new minutes listened before triggering a sync |
+| `UI_PASSWORD` | *(unset)* | If set, enables HTTP Basic Auth on the web UI (any username) |
 
 Credentials can also be updated at runtime via the web UI without restarting the container.
 

@@ -2,9 +2,9 @@
 ABS to StoryGraph Sync Service
 """
 
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, Response
 from urllib.parse import urlparse
-import os, re, json, logging, threading, time
+import os, re, json, logging, threading, time, hmac
 from collections import deque
 from datetime import datetime
 import requests as req
@@ -318,6 +318,20 @@ def _poll_loop():
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
+
+
+@app.before_request
+def check_auth():
+    password = os.environ.get("UI_PASSWORD")
+    if not password:
+        return  # auth disabled — UI_PASSWORD not set
+    auth = request.authorization
+    if not auth or not hmac.compare_digest(auth.password or "", password):
+        return Response(
+            "Authentication required.",
+            401,
+            {"WWW-Authenticate": 'Basic realm="ABS Sync"'},
+        )
 
 
 @app.route("/")
