@@ -3,6 +3,7 @@ ABS to StoryGraph Sync Service
 """
 
 from flask import Flask, jsonify, request, render_template
+from urllib.parse import urlparse
 import os, re, json, logging, threading, time
 from collections import deque
 from datetime import datetime
@@ -371,6 +372,12 @@ def api_logs():
 def api_settings():
     data = request.json or {}
     allowed = {"ABS_URL", "ABS_TOKEN", "STORYGRAPH_SESSION", "STORYGRAPH_REMEMBER_TOKEN"}
+    if "ABS_URL" in data and data["ABS_URL"]:
+        parsed = urlparse(data["ABS_URL"])
+        if parsed.scheme not in ("http", "https"):
+            return jsonify({"error": "ABS_URL must use http or https"}), 400
+        if not parsed.hostname:
+            return jsonify({"error": "ABS_URL must include a hostname"}), 400
     with _config_lock:
         for k, v in data.items():
             if k in allowed and v:
@@ -389,13 +396,6 @@ def api_settings_get():
         "STORYGRAPH_SESSION": "set" if cfg("STORYGRAPH_SESSION") else "",
         "STORYGRAPH_REMEMBER_TOKEN": "set" if cfg("STORYGRAPH_REMEMBER_TOKEN") else "",
     })
-
-
-@app.route("/debug-abs")
-def debug_abs():
-    headers = {"Authorization": f"Bearer {cfg('ABS_TOKEN')}"}
-    resp = req.get(f"{cfg('ABS_URL')}/api/me/items-in-progress", headers=headers, timeout=10)
-    return jsonify(resp.json())
 
 
 if __name__ == "__main__":
