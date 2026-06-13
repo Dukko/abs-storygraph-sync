@@ -144,33 +144,40 @@ class StoryGraphClient:
         resp = self._get(f"/books/{book_id}")
         status_match = re.search(r'class="read-status-label"[^>]*>([^<]+)<', resp.text)
         status = status_match.group(1).strip().lower() if status_match else ""
+        logger.info("Book %s current status: '%s'", book_id, status or "(none found)")
         if "currently reading" in status or "rereading" in status:
             return True
         update_resp = self._post(
             f"/update-status.js?book_id={book_id}&status=currently-reading",
             {"authenticity_token": self._last_csrf},
         )
-        logger.info("Set currently-reading for %s: HTTP %s", book_id, update_resp.status_code)
+        logger.info("Set currently-reading for %s: HTTP %s | body: %s",
+                    book_id, update_resp.status_code, update_resp.text[:200])
         return update_resp.status_code in (200, 302)
 
     def update_progress(self, book_id, progress_percent):
         resp = self._get(f"/books/{book_id}")
+        csrf = self._last_csrf
         pages_match = re.search(
             r'(?:name="read_status\[book_num_of_pages\]"|class="read-status-book-num-of-pages")[^>]*value="([^"]*)"',
             resp.text,
         )
         book_pages = pages_match.group(1) if pages_match else "0"
+        logger.info("Updating %s: csrf=%s pages=%s progress=%.1f%%",
+                    book_id, bool(csrf), book_pages, progress_percent)
         update_resp = self._post("/update-progress", {
             "read_status[progress_number]": str(round(progress_percent, 1)),
             "read_status[progress_type]": "percentage",
             "read_status[book_num_of_pages]": book_pages,
             "book_id": book_id,
             "on_book_page": "true",
-            "authenticity_token": self._last_csrf,
+            "authenticity_token": csrf,
         })
-        ok = update_resp.status_code in (200, 302)
-        logger.info("Updated progress for %s to %.1f%%: HTTP %s", book_id, progress_percent, update_resp.status_code)
-        return ok
+        logger.info("Progress update for %s: HTTP %s | location: %s | body: %s",
+                    book_id, update_resp.status_code,
+                    update_resp.headers.get("location", ""),
+                    update_resp.text[:300])
+        return update_resp.status_code in (200, 302)
 
 
 def do_sync(books_to_sync: list[dict]) -> list[dict]:
