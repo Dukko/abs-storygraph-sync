@@ -236,6 +236,23 @@ class StoryGraphClient:
 _last_synced: dict[str, float] = {}
 _last_synced_lock = threading.Lock()
 
+_status_cache: dict = {"books": [], "abs_ok": False, "ts": 0.0}
+_status_cache_lock = threading.Lock()
+STATUS_CACHE_TTL = 60  # seconds
+
+
+def get_cached_books() -> tuple[list[dict], bool]:
+    with _status_cache_lock:
+        if time.time() - _status_cache["ts"] < STATUS_CACHE_TTL:
+            return _status_cache["books"], _status_cache["abs_ok"]
+    try:
+        books = get_abs_recent_books()
+        with _status_cache_lock:
+            _status_cache.update({"books": books, "abs_ok": True, "ts": time.time()})
+        return books, True
+    except Exception:
+        return _status_cache["books"], False
+
 
 def do_sync(books: list[dict]) -> list[dict]:
     client = StoryGraphClient()
@@ -271,6 +288,9 @@ def _poll_loop():
             continue
         try:
             books = get_abs_recent_books()
+            # update cache so UI shows fresh data after each poll
+            with _status_cache_lock:
+                _status_cache.update({"books": books, "abs_ok": True, "ts": time.time()})
             to_sync = []
             with _last_synced_lock:
                 for b in books:
@@ -301,12 +321,8 @@ def index():
 @app.route("/api/status")
 def api_status():
     books, abs_ok = [], False
-    try:
-        if cfg("ABS_URL") and cfg("ABS_TOKEN"):
-            books = get_abs_recent_books()
-            abs_ok = True
-    except Exception:
-        pass
+    if cfg("ABS_URL") and cfg("ABS_TOKEN"):
+        books, abs_ok = get_cached_books()
     with _last_synced_lock:
         last = dict(_last_synced)
     return jsonify({
