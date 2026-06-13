@@ -72,11 +72,12 @@ class StoryGraphSyncer:
 
     def login(self) -> bool:
         try:
-            self.page.goto("https://app.thestorygraph.com/users/sign_in", wait_until="networkidle")
+            self.page.goto("https://app.thestorygraph.com/users/sign_in", wait_until="domcontentloaded")
+            self.page.wait_for_selector("#user_email", timeout=15000)
             self.page.fill("#user_email", self.email)
             self.page.fill("#user_password", self.password)
             self.page.click("[name='commit']")
-            self.page.wait_for_url("**/users/sign_in", predicate=lambda url: "sign_in" not in url, timeout=15000)
+            self.page.wait_for_url(lambda url: "sign_in" not in url, timeout=15000)
             logger.info("StoryGraph login successful")
             return True
         except Exception as e:
@@ -85,7 +86,7 @@ class StoryGraphSyncer:
 
     def search_book(self, title: str, author: str) -> str | None:
         try:
-            self.page.goto("https://app.thestorygraph.com/browse", wait_until="networkidle")
+            self.page.goto("https://app.thestorygraph.com/browse", wait_until="domcontentloaded")
             self.page.fill('input[type="search"]', f"{title} {author}".strip())
             self.page.keyboard.press("Enter")
             self.page.wait_for_selector("a.book-title-link", timeout=10000)
@@ -98,7 +99,7 @@ class StoryGraphSyncer:
 
     def update_progress(self, book_url: str, current_minutes: float) -> bool:
         try:
-            self.page.goto(book_url, wait_until="networkidle")
+            self.page.goto(book_url, wait_until="domcontentloaded")
             minutes_value = str(int(current_minutes))
 
             # Open update/log progress modal; add to currently reading first if needed
