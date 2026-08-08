@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ABS → StoryGraph — Sign in</title>
+  <title>ABS → StoryGraph — Setup</title>
   <style>
     :root {
       --bg:       #0d0d14;
@@ -63,6 +63,7 @@
       color: var(--text-dim);
       font-size: 0.85rem;
       margin-bottom: 2rem;
+      line-height: 1.5;
     }
 
     label {
@@ -114,38 +115,6 @@
     }
 
     button:hover { opacity: 0.85; }
-
-    .btn-oidc {
-      display: block;
-      width: 100%;
-      text-align: center;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--text);
-      padding: 0.65rem;
-      margin-bottom: 1.1rem;
-      text-decoration: none;
-      font-size: 0.875rem;
-      font-weight: 600;
-      transition: border-color 0.15s;
-    }
-    .btn-oidc:hover { border-color: var(--accent); }
-
-    .divider {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1.1rem;
-      color: var(--text-dim);
-      font-size: 0.75rem;
-    }
-    .divider::before, .divider::after {
-      content: "";
-      flex: 1;
-      height: 1px;
-      background: var(--border);
-    }
   </style>
 </head>
 <body>
@@ -154,15 +123,10 @@
       <div class="logo-icon">📚</div>
       ABS → StoryGraph
     </div>
-    <p class="subtitle">Sign in to continue</p>
+    <p class="subtitle">No accounts exist yet. Create the first account to get started — it'll be an admin, able to add more users later.</p>
 
     {% if error %}
     <div class="error">{{ error }}</div>
-    {% endif %}
-
-    {% if oidc_enabled %}
-    <a class="btn-oidc" href="{{ url_for('login_oidc') }}">Sign in with SSO</a>
-    <div class="divider">or</div>
     {% endif %}
 
     <form method="post" autocomplete="on">
@@ -172,9 +136,9 @@
 
       <label for="password">Password</label>
       <input id="password" name="password" type="password"
-             autocomplete="current-password" required>
+             autocomplete="new-password" required>
 
-      <button type="submit">Sign in</button>
+      <button type="submit">Create admin account</button>
     </form>
   </div>
 </body>

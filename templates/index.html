@@ -403,9 +403,8 @@
       <div class="pill"><div class="dot" id="d-sg"></div><span id="l-sg">StoryGraph</span></div>
       <div class="pill"><div class="dot ok" id="d-poll"></div><span id="l-poll">Auto-sync</span></div>
     </div>
-    {% if auth_enabled %}
+    <span style="font-size:0.75rem;color:var(--text-dim)">{{ display_name }}</span>
     <a href="/logout" style="font-size:0.75rem;color:var(--text-dim);text-decoration:none;padding:0.25rem 0.6rem;border:1px solid var(--border);border-radius:6px;transition:color 0.15s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">Sign out</a>
-    {% endif %}
   </div>
 </header>
 
@@ -459,6 +458,15 @@
           </div>
           <span class="hint">remember_user_token cookie</span>
         </div>
+        <div class="field span2">
+          <label>Sync Scope</label>
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap" id="scope-group">
+            <button type="button" class="btn btn-ghost scope-btn" data-scope="in_progress">In Progress</button>
+            <button type="button" class="btn btn-ghost scope-btn" data-scope="in_progress_finished">+ Finished</button>
+            <button type="button" class="btn btn-ghost scope-btn" data-scope="library">Entire Library</button>
+          </div>
+          <span class="hint">Which books to push to StoryGraph. "Entire Library" also marks untouched books as to-read.</span>
+        </div>
       </div>
       <div class="form-footer">
         <button type="submit" class="btn btn-primary">Save Settings</button>
@@ -467,8 +475,34 @@
     </form>
   </div>
 
-  <!-- Logs -->
+  {% if is_admin %}
+  <!-- Users -->
   <div class="card">
+    <div class="section-header">
+      <h2>Users</h2>
+      <button class="btn btn-primary" onclick="showAddUser()">Add User</button>
+    </div>
+    <div id="users-list"></div>
+    <form id="add-user-form" style="display:none;margin-top:1rem" onsubmit="createUser(event)">
+      <div class="settings-grid">
+        <div class="field">
+          <label>Username</label>
+          <input type="text" id="nu-username" autocomplete="off">
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="password" id="nu-password" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="form-footer">
+        <button type="submit" class="btn btn-primary">Create</button>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
+  <!-- Logs -->
+  <div class="card" {% if not is_admin %}style="display:none"{% endif %}>
     <div class="section-header">
       <h2>Logs</h2>
       <div class="log-toolbar">
@@ -484,9 +518,18 @@
 <div id="toast"></div>
 
 <script>
+  const IS_ADMIN = {{ is_admin | tojson }};
   let autoRefresh = true;
   let timer;
   let shownLogs = 0;
+  let selectedScope = 'in_progress';
+
+  document.querySelectorAll('.scope-btn').forEach(btn => {
+    btn.onclick = () => {
+      selectedScope = btn.dataset.scope;
+      document.querySelectorAll('.scope-btn').forEach(b => b.classList.toggle('active', b.dataset.scope === selectedScope));
+    };
+  });
 
   // ── Status ────────────────────────────────────────────────────────────────
 
@@ -500,7 +543,7 @@
 
       const grid = document.getElementById('books-grid');
       if (!d.books?.length) {
-        grid.innerHTML = '<div class="empty-state">No audiobooks in progress.</div>';
+        grid.innerHTML = '<div class="empty-state">No audiobooks found for the current sync scope.</div>';
         return;
       }
       grid.innerHTML = d.books.map(b => {
@@ -580,6 +623,8 @@
           document.getElementById(id).classList.add('is-set');
         }
       });
+      selectedScope = d.SYNC_SCOPE || 'in_progress';
+      document.querySelectorAll('.scope-btn').forEach(b => b.classList.toggle('active', b.dataset.scope === selectedScope));
     } catch(e) {}
   }
 
@@ -596,6 +641,7 @@
       const v = document.getElementById(id).value;
       if (v) payload[key] = v;
     }
+    payload['SYNC_SCOPE'] = selectedScope;
     const r = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -621,9 +667,56 @@
     btn.textContent = el.type === 'password' ? '👁' : '🙈';
   }
 
+  // ── Users ─────────────────────────────────────────────────────────────────
+
+  async function loadUsers() {
+    try {
+      const d = await (await fetch('/api/users')).json();
+      document.getElementById('users-list').innerHTML = (d.users || []).map(u => `
+        <div class="result-row">
+          <span class="result-title">${esc(u.display_name || u.username)}</span>
+          ${u.is_admin ? '<span class="badge success">admin</span>' : ''}
+          ${u.via_oidc ? '<span class="badge not_found">sso</span>' : ''}
+          <button class="btn btn-ghost" onclick="deleteUser('${u.id}')">Remove</button>
+        </div>`).join('') || '<div class="empty-state">No users yet.</div>';
+    } catch(e) {}
+  }
+
+  function showAddUser() {
+    document.getElementById('add-user-form').style.display = 'block';
+  }
+
+  async function createUser(e) {
+    e.preventDefault();
+    const username = document.getElementById('nu-username').value;
+    const password = document.getElementById('nu-password').value;
+    const r = await fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      document.getElementById('add-user-form').style.display = 'none';
+      document.getElementById('nu-username').value = '';
+      document.getElementById('nu-password').value = '';
+      toast('✓ User created');
+      loadUsers();
+    } else {
+      toast(d.error || 'Failed to create user', 'err');
+    }
+  }
+
+  async function deleteUser(id) {
+    const r = await fetch('/api/users/' + id, { method: 'DELETE' });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) loadUsers(); else toast(d.error || 'Failed to remove user', 'err');
+  }
+
   // ── Logs ──────────────────────────────────────────────────────────────────
 
   async function fetchLogs(force = false) {
+    if (!IS_ADMIN) return;
     try {
       const d = await (await fetch('/api/logs')).json();
       if (d.logs.length === shownLogs && !force) return;
@@ -680,6 +773,7 @@
   fetchStatus();
   fetchLogs();
   loadSettings();
+  if (IS_ADMIN) loadUsers();
   startTimer();
 </script>
 </body>
