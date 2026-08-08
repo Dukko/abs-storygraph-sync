@@ -2,30 +2,21 @@
 
 Automatically syncs your [Audiobookshelf](https://www.audiobookshelf.org/) listening progress to [StoryGraph](https://www.thestorygraph.com/).
 
-Runs as a lightweight Docker container alongside ABS. No browser automation — uses the ABS REST API and StoryGraph session cookies directly.
+Runs as a lightweight Docker container alongside ABS. No browser automation — uses the ABS REST API and StoryGraph session cookies directly. Supports multiple people sharing one instance, each with their own ABS/StoryGraph credentials.
 
 ## Features
 
+- Multi-user: everyone gets their own account, ABS/StoryGraph credentials, and sync state
+- Login via local username/password, or SSO through any OIDC provider (e.g. [PocketID](https://github.com/pocket-id/pocket-id))
 - Auto-syncs progress whenever you've listened to 5+ new minutes of a book
-- Web UI to update credentials, view logs, and trigger a manual sync
+- Configurable sync scope: just in-progress books, in-progress + finished, or your entire library
+- Web UI to manage credentials, view logs, and trigger a manual sync
 - Progress is only pushed to StoryGraph when it actually changes (no duplicate journal entries)
-- Settings and sync state persist across restarts
+- Accounts, settings, and sync state persist across restarts
 
 ## Setup
 
-### 1. Get your ABS API token
-
-In Audiobookshelf: **Settings → Users → your user → API Token**
-
-### 2. Get your StoryGraph session cookies
-
-1. Log in to [app.thestorygraph.com](https://app.thestorygraph.com) in your browser
-2. Open DevTools → **Application** → **Cookies** → `app.thestorygraph.com`
-3. Copy the values for:
-   - `_storygraph_session`
-   - `remember_user_token`
-
-### 3. Run with Docker Compose
+### 1. Run with Docker Compose
 
 ```yaml
 services:
@@ -37,44 +28,63 @@ services:
       - ./data:/app/data
     environment:
       PORT: "5465"
-      ABS_URL: http://localhost:13378
-      ABS_TOKEN: your_abs_api_token_here
-      STORYGRAPH_SESSION: your_storygraph_session_cookie_here
-      STORYGRAPH_REMEMBER_TOKEN: your_remember_user_token_here
+      # Optional: enable "Sign in with SSO" for any OIDC provider (e.g. PocketID)
+      # OIDC_ISSUER: https://id.example.com
+      # OIDC_CLIENT_ID: your_client_id
+      # OIDC_CLIENT_SECRET: your_client_secret
 ```
 
 ```sh
 docker compose up -d
 ```
 
-Then open **http://your-server:5465** to access the dashboard.
+Open **http://your-server:5465** — the first visit prompts you to create an account, which becomes an admin. Admins can add more local accounts from the **Users** panel; anyone who signs in via SSO gets an account automatically on first login.
 
-> **Note:** The web UI has **no authentication by default**. Keep the port on your local network only — don't expose it to the internet. To enable a login page, set `UI_USERNAME` and `UI_PASSWORD` (see Configuration below).
+### 2. Get your ABS API token
+
+In Audiobookshelf: **Settings → Users → your user → API Token**
+
+### 3. Get your StoryGraph session cookies
+
+1. Log in to [app.thestorygraph.com](https://app.thestorygraph.com) in your browser
+2. Open DevTools → **Application** → **Cookies** → `app.thestorygraph.com`
+3. Copy the values for:
+   - `_storygraph_session`
+   - `remember_user_token`
+
+### 4. Enter your credentials
+
+Paste your ABS URL/token and StoryGraph cookies into the **Settings** card in the web UI (each account has its own). Optionally set the **Sync Scope** there too — see below.
 
 ## Configuration
 
-All environment variables:
+Instance-wide environment variables (set once by whoever deploys the container):
 
 | Variable | Default | Description |
 |---|---|---|
-| `ABS_URL` | — | Base URL of your Audiobookshelf instance |
-| `ABS_TOKEN` | — | ABS API token |
-| `STORYGRAPH_SESSION` | — | `_storygraph_session` cookie value |
-| `STORYGRAPH_REMEMBER_TOKEN` | — | `remember_user_token` cookie value |
 | `PORT` | `5465` | Port for the web UI |
 | `POLL_INTERVAL` | `600` | How often to check for new progress (seconds) |
 | `SYNC_THRESHOLD_MINUTES` | `5` | Minimum new minutes listened before triggering a sync |
-| `UI_PASSWORD` | *(unset)* | If set, enables a login page on the web UI |
-| `UI_USERNAME` | `admin` | Username for the login page (only used if `UI_PASSWORD` is set) |
+| `OIDC_ISSUER` | *(unset)* | Base URL of your OIDC provider (must expose `/.well-known/openid-configuration`) |
+| `OIDC_CLIENT_ID` | *(unset)* | OIDC client ID |
+| `OIDC_CLIENT_SECRET` | *(unset)* | OIDC client secret |
 
-Credentials can also be updated at runtime via the web UI without restarting the container.
+Everything else — ABS credentials, StoryGraph cookies, sync scope — is per-user, set through the web UI, no restart needed.
+
+## Sync scope
+
+Each user picks how much of their library to sync, in **Settings**:
+
+- **In Progress** (default) — only books you're currently listening to
+- **+ Finished** — the above, plus books you've completed (marked "read" on StoryGraph)
+- **Entire Library** — every book, including ones you haven't started (marked "to-read" on StoryGraph)
 
 ## How it works
 
-1. Every `POLL_INTERVAL` seconds, fetches your in-progress books from the ABS API
-2. If any book has gained `SYNC_THRESHOLD_MINUTES` or more minutes since the last check, it triggers a sync
-3. For each book to sync, searches StoryGraph by title/author, sets it to "currently reading", and updates the progress percentage
-4. Progress is only pushed if it changed by ≥ 0.5% since the last successful sync, preventing duplicate reading journal entries
+1. Every `POLL_INTERVAL` seconds, fetches each user's books from the ABS API (scoped per their Sync Scope setting)
+2. If any book has gained `SYNC_THRESHOLD_MINUTES` or more minutes since the last check, or has just been finished, it triggers a sync
+3. For each book to sync, searches StoryGraph by title/author, sets its status (to-read / currently-reading / read), and updates the progress percentage
+4. Progress/status is only pushed if it actually changed since the last successful sync, preventing duplicate reading journal entries
 
 StoryGraph has no public API — this tool uses session cookies to make the same requests the website does.
 

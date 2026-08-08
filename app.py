@@ -2,71 +2,34 @@
 ABS to StoryGraph Sync Service
 """
 
-from flask import Flask, jsonify, request, render_template, Response, session, redirect, url_for
+from flask import Flask, jsonify, request, render_template, session, redirect, url_for, g
 from urllib.parse import urlparse
-import os, re, json, logging, threading, time, hmac
+from functools import wraps
+import os, re, json, logging, threading, time, uuid
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 import requests as req
 from bs4 import BeautifulSoup
+from werkzeug.security import generate_password_hash, check_password_hash
+from authlib.integrations.flask_client import OAuth
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Paths ────────────────────────────────────────────────────────────────────
 
 DATA_DIR = "/app/data"
-CONFIG_FILE = f"{DATA_DIR}/config.json"
-SYNC_STATE_FILE = f"{DATA_DIR}/sync_state.json"
-_runtime_config: dict = {}
-_config_lock = threading.Lock()
+USERS_FILE = f"{DATA_DIR}/users.json"
+CONFIG_DIR = f"{DATA_DIR}/config"
+SYNC_STATE_DIR = f"{DATA_DIR}/sync_state"
 
-
-def _load_file_config() -> dict:
-    try:
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def _save_file_config(data: dict):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def cfg(key: str, default: str = "") -> str:
-    with _config_lock:
-        return _runtime_config.get(key) or os.environ.get(key, default)
-
-
-# Load file config on startup (overrides env vars)
-with _config_lock:
-    _runtime_config.update(_load_file_config())
-
-# Tracks the last progress % successfully pushed to StoryGraph, persisted across restarts
-_synced_pct: dict[str, float] = {}
-_synced_pct_lock = threading.Lock()
-
-
-def _load_sync_state():
-    try:
-        with open(SYNC_STATE_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def _save_sync_state(data: dict):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(SYNC_STATE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-with _synced_pct_lock:
-    _synced_pct.update(_load_sync_state())
-
+STORYGRAPH_BASE = "https://app.thestorygraph.com"
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 600))
 SYNC_THRESHOLD = float(os.environ.get("SYNC_THRESHOLD_MINUTES", 5))
-STORYGRAPH_BASE = "https://app.thestorygraph.com"
+
+OIDC_ISSUER = os.environ.get("OIDC_ISSUER")
+OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID")
+OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET")
+OIDC_ENABLED = bool(OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
+
+SYNC_SCOPES = ("in_progress", "in_progress_finished", "library")
 
 
 def _get_secret_key() -> bytes:
@@ -111,42 +74,249 @@ logger = logging.getLogger(__name__)
 logging.getLogger().addHandler(_log_buffer)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)  # suppress per-request access logs
 
+# ── User store ───────────────────────────────────────────────────────────────
+
+_users_lock = threading.Lock()
+
+
+def _load_users() -> list[dict]:
+    try:
+        with open(USERS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_users(users: list[dict]):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f, indent=2)
+
+
+def any_users_exist() -> bool:
+    with _users_lock:
+        return bool(_load_users())
+
+
+def list_users() -> list[dict]:
+    with _users_lock:
+        return _load_users()
+
+
+def get_user(user_id: str) -> dict | None:
+    with _users_lock:
+        return next((u for u in _load_users() if u["id"] == user_id), None)
+
+
+def get_user_by_username(username: str) -> dict | None:
+    username = (username or "").lower()
+    with _users_lock:
+        return next((u for u in _load_users() if (u.get("username") or "").lower() == username), None)
+
+
+def get_user_by_oidc_sub(sub: str) -> dict | None:
+    with _users_lock:
+        return next((u for u in _load_users() if u.get("oidc_sub") == sub), None)
+
+
+def create_user(*, username=None, password=None, oidc_sub=None, display_name=None, is_admin=False) -> dict:
+    with _users_lock:
+        users = _load_users()
+        user = {
+            "id": uuid.uuid4().hex,
+            "username": username,
+            "password_hash": generate_password_hash(password) if password else None,
+            "oidc_sub": oidc_sub,
+            "display_name": display_name or username or "User",
+            "is_admin": is_admin,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        users.append(user)
+        _save_users(users)
+        return user
+
+
+def update_user(user_id: str, **fields):
+    with _users_lock:
+        users = _load_users()
+        for u in users:
+            if u["id"] == user_id:
+                u.update(fields)
+        _save_users(users)
+
+
+def delete_user(user_id: str):
+    with _users_lock:
+        users = [u for u in _load_users() if u["id"] != user_id]
+        _save_users(users)
+
+# ── Per-user config ──────────────────────────────────────────────────────────
+
+_config_lock = threading.Lock()
+_runtime_config: dict[str, dict] = {}
+
+
+def _config_file(user_id: str) -> str:
+    return f"{CONFIG_DIR}/{user_id}.json"
+
+
+def _load_user_config(user_id: str) -> dict:
+    try:
+        with open(_config_file(user_id)) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_user_config(user_id: str, data: dict):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(_config_file(user_id), "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def cfg(user_id: str, key: str, default: str = "") -> str:
+    with _config_lock:
+        if user_id not in _runtime_config:
+            _runtime_config[user_id] = _load_user_config(user_id)
+        return _runtime_config[user_id].get(key) or default
+
+
+def set_cfg(user_id: str, updates: dict):
+    with _config_lock:
+        if user_id not in _runtime_config:
+            _runtime_config[user_id] = _load_user_config(user_id)
+        _runtime_config[user_id].update({k: v for k, v in updates.items() if v})
+        _save_user_config(user_id, _runtime_config[user_id])
+
+# ── Per-user sync state ──────────────────────────────────────────────────────
+# Tracks the last {progress %, StoryGraph status} successfully pushed per book, persisted across restarts.
+
+_synced_state: dict[str, dict] = {}
+_synced_state_lock = threading.Lock()
+
+
+def _sync_state_file(user_id: str) -> str:
+    return f"{SYNC_STATE_DIR}/{user_id}.json"
+
+
+def _load_sync_state(user_id: str) -> dict:
+    try:
+        with open(_sync_state_file(user_id)) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_sync_state(user_id: str, data: dict):
+    os.makedirs(SYNC_STATE_DIR, exist_ok=True)
+    with open(_sync_state_file(user_id), "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _get_synced(user_id: str) -> dict:
+    with _synced_state_lock:
+        if user_id not in _synced_state:
+            _synced_state[user_id] = _load_sync_state(user_id)
+        return _synced_state[user_id]
+
 # ── ABS ───────────────────────────────────────────────────────────────────────
 
-def get_abs_in_progress() -> list[dict]:
-    headers = {"Authorization": f"Bearer {cfg('ABS_TOKEN')}"}
-    resp = req.get(f"{cfg('ABS_URL')}/api/me/items-in-progress", headers=headers, timeout=10)
+def _abs_headers(user_id: str) -> dict:
+    return {"Authorization": f"Bearer {cfg(user_id, 'ABS_TOKEN')}"}
+
+
+def _abs_get(user_id: str, path: str, params: dict | None = None):
+    resp = req.get(f"{cfg(user_id, 'ABS_URL')}{path}", headers=_abs_headers(user_id), params=params, timeout=10)
     resp.raise_for_status()
+    return resp
+
+
+def _item_to_book(item: dict, progress: dict) -> dict | None:
+    media = item.get("media", {})
+    metadata = media.get("metadata", {})
+    title = metadata.get("title", "").strip()
+    if not title:
+        return None
+    return {
+        "title": title,
+        "author": metadata.get("authorName", ""),
+        "progress_percent": round((progress.get("progress") or 0) * 100, 1),
+        "current_minutes": round((progress.get("currentTime") or 0) / 60, 1),
+        "duration_minutes": round((media.get("duration") or 0) / 60, 1),
+        "is_finished": bool(progress.get("isFinished")),
+    }
+
+
+def get_abs_books(user_id: str, scope: str) -> list[dict]:
+    if scope == "in_progress":
+        resp = _abs_get(user_id, "/api/me/items-in-progress")
+        books = []
+        for item in resp.json().get("libraryItems", []):
+            item_id = item.get("id", "")
+            progress = {}
+            if item_id:
+                pr = req.get(f"{cfg(user_id, 'ABS_URL')}/api/me/progress/{item_id}", headers=_abs_headers(user_id), timeout=10)
+                if pr.status_code == 200:
+                    progress = pr.json()
+            book = _item_to_book(item, progress)
+            if book:
+                books.append(book)
+        return books
+
+    # in_progress_finished / library both need every progress entry the user has
+    me = _abs_get(user_id, "/api/me").json()
+    progress_by_item = {p["libraryItemId"]: p for p in me.get("mediaProgress", []) if p.get("libraryItemId")}
+
+    if scope == "in_progress_finished":
+        books = []
+        for item_id, progress in progress_by_item.items():
+            if not ((progress.get("currentTime") or 0) > 0 or progress.get("isFinished")):
+                continue
+            item_resp = req.get(f"{cfg(user_id, 'ABS_URL')}/api/items/{item_id}", headers=_abs_headers(user_id), timeout=10)
+            if item_resp.status_code != 200:
+                continue
+            book = _item_to_book(item_resp.json(), progress)
+            if book:
+                books.append(book)
+        return books
+
+    # scope == "library": every book, including untouched ones
+    libraries = _abs_get(user_id, "/api/libraries").json().get("libraries", [])
     books = []
-    for item in resp.json().get("libraryItems", []):
-        media = item.get("media", {})
-        metadata = media.get("metadata", {})
-        title = metadata.get("title", "").strip()
-        if not title:
-            continue
-        item_id = item.get("id", "")
-        progress_data = {}
-        if item_id:
-            pr = req.get(f"{cfg('ABS_URL')}/api/me/progress/{item_id}", headers=headers, timeout=10)
-            if pr.status_code == 200:
-                progress_data = pr.json()
-        books.append({
-            "title": title,
-            "author": metadata.get("authorName", ""),
-            "progress_percent": round((progress_data.get("progress") or 0) * 100, 1),
-            "current_minutes": round((progress_data.get("currentTime") or 0) / 60, 1),
-            "duration_minutes": round((media.get("duration") or 0) / 60, 1),
-        })
+    for lib in libraries:
+        page = 0
+        while True:
+            resp = _abs_get(user_id, f"/api/libraries/{lib['id']}/items", params={"limit": 100, "page": page})
+            data = resp.json()
+            results = data.get("results", [])
+            total = data.get("total", len(results))
+            for item in results:
+                progress = progress_by_item.get(item.get("id"), {})
+                book = _item_to_book(item, progress)
+                if book:
+                    books.append(book)
+            page += 1
+            if not results or page * 100 >= total:
+                break
     return books
 
 # ── StoryGraph ────────────────────────────────────────────────────────────────
 
+# StoryGraph has no public API — these status slugs are reverse-engineered from
+# the site's own /update-status.js requests and may change without notice.
+_STATUS_LABELS = {
+    "to-read": "to read",
+    "currently-reading": "currently reading",
+    "read": "read",
+}
+
+
 class StoryGraphClient:
-    def __init__(self):
+    def __init__(self, session_cookie: str, remember_token: str = ""):
         self._session = req.Session()
         for name, val in [
-            ("_storygraph_session", cfg("STORYGRAPH_SESSION")),
-            ("remember_user_token", cfg("STORYGRAPH_REMEMBER_TOKEN")),
+            ("_storygraph_session", session_cookie),
+            ("remember_user_token", remember_token),
             ("cookies_popup_seen", "yes"),
             ("plus_popup_seen", "yes"),
         ]:
@@ -210,17 +380,18 @@ class StoryGraphClient:
         logger.warning("No StoryGraph result for '%s'", title)
         return None
 
-    def ensure_currently_reading(self, book_id):
+    def ensure_status(self, book_id, target_status):
         resp = self._get(f"/books/{book_id}")
         m = re.search(r'class="read-status-label"[^>]*>([^<]+)<', resp.text)
-        status = m.group(1).strip().lower() if m else ""
-        if "currently reading" in status or "rereading" in status:
+        current = m.group(1).strip().lower() if m else ""
+        label = _STATUS_LABELS[target_status]
+        if label in current or (target_status == "currently-reading" and "rereading" in current):
             return True
         r = self._post(
-            f"/update-status.js?book_id={book_id}&status=currently-reading",
+            f"/update-status.js?book_id={book_id}&status={target_status}",
             {"authenticity_token": self._last_csrf},
         )
-        logger.info("Set currently-reading for %s: HTTP %s", book_id, r.status_code)
+        logger.info("Set status=%s for %s: HTTP %s", target_status, book_id, r.status_code)
         return r.status_code in (200, 302)
 
     def update_progress(self, book_id, progress_percent) -> bool:
@@ -244,40 +415,52 @@ class StoryGraphClient:
 
 # ── Sync logic ────────────────────────────────────────────────────────────────
 
-_last_synced: dict[str, float] = {}
+_last_synced: dict[str, dict[str, float]] = {}
 _last_synced_lock = threading.Lock()
 
-_status_cache: dict = {"books": [], "abs_ok": False, "ts": 0.0}
+_status_cache: dict[str, dict] = {}
 _status_cache_lock = threading.Lock()
 STATUS_CACHE_TTL = 60  # seconds
 
 
-def get_cached_books() -> tuple[list[dict], bool]:
+def get_cached_books(user_id: str, scope: str) -> tuple[list[dict], bool]:
     with _status_cache_lock:
-        if time.time() - _status_cache["ts"] < STATUS_CACHE_TTL:
-            return _status_cache["books"], _status_cache["abs_ok"]
+        cache = _status_cache.get(user_id, {"books": [], "abs_ok": False, "ts": 0.0})
+        if time.time() - cache["ts"] < STATUS_CACHE_TTL:
+            return cache["books"], cache["abs_ok"]
     try:
-        books = get_abs_in_progress()
+        books = get_abs_books(user_id, scope)
         with _status_cache_lock:
-            _status_cache.update({"books": books, "abs_ok": True, "ts": time.time()})
+            _status_cache[user_id] = {"books": books, "abs_ok": True, "ts": time.time()}
         return books, True
     except Exception:
-        return _status_cache["books"], False
+        return cache["books"], False
 
 
-def do_sync(books: list[dict]) -> list[dict]:
-    client = StoryGraphClient()
+def _target_status(book: dict) -> str:
+    if book.get("is_finished"):
+        return "read"
+    if book["progress_percent"] > 0:
+        return "currently-reading"
+    return "to-read"
+
+
+def do_sync(user_id: str, books: list[dict]) -> list[dict]:
+    user = get_user(user_id)
+    label = (user or {}).get("username") or (user or {}).get("display_name") or user_id
+    client = StoryGraphClient(cfg(user_id, "STORYGRAPH_SESSION"), cfg(user_id, "STORYGRAPH_REMEMBER_TOKEN"))
     if not client.check_auth():
-        logger.error("StoryGraph session invalid — update STORYGRAPH_SESSION")
+        logger.error("[%s] StoryGraph session invalid — update STORYGRAPH_SESSION", label)
         return [{"title": b["title"], "status": "auth_error"} for b in books]
+    synced = _get_synced(user_id)
     results = []
     for book in books:
         try:
             pct = book["progress_percent"]
-            with _synced_pct_lock:
-                prev_pct = _synced_pct.get(book["title"])
-            if prev_pct is not None and abs(pct - prev_pct) < 0.5:
-                logger.info("'%s' unchanged at %.1f%% — skipping", book["title"], pct)
+            status = _target_status(book)
+            prev = synced.get(book["title"])
+            if prev is not None and prev.get("status") == status and abs(pct - prev.get("pct", -1)) < 0.5:
+                logger.info("[%s] '%s' unchanged (%s, %.1f%%) — skipping", label, book["title"], status, pct)
                 results.append({"title": book["title"], "status": "unchanged", "progress_percent": pct})
                 continue
 
@@ -285,12 +468,13 @@ def do_sync(books: list[dict]) -> list[dict]:
             if not book_id:
                 results.append({"title": book["title"], "status": "not_found"})
                 continue
-            client.ensure_currently_reading(book_id)
-            ok = client.update_progress(book_id, pct)
+            client.ensure_status(book_id, status)
+            ok = True
+            if status != "to-read":
+                ok = client.update_progress(book_id, 100 if status == "read" else pct)
             if ok:
-                with _synced_pct_lock:
-                    _synced_pct[book["title"]] = pct
-                    _save_sync_state(dict(_synced_pct))
+                synced[book["title"]] = {"pct": pct, "status": status}
+                _save_sync_state(user_id, synced)
             results.append({
                 "title": book["title"],
                 "status": "success" if ok else "failed",
@@ -298,72 +482,147 @@ def do_sync(books: list[dict]) -> list[dict]:
                 "current_minutes": book["current_minutes"],
             })
         except Exception as e:
-            logger.error("Error syncing '%s': %s", book["title"], e)
+            logger.error("[%s] Error syncing '%s': %s", label, book["title"], e)
             results.append({"title": book["title"], "status": "error", "error": str(e)})
     return results
+
+
+def _poll_user(user: dict):
+    user_id = user["id"]
+    if not all([cfg(user_id, "ABS_URL"), cfg(user_id, "ABS_TOKEN"), cfg(user_id, "STORYGRAPH_SESSION")]):
+        return
+    scope = cfg(user_id, "SYNC_SCOPE", "in_progress")
+    label = user.get("username") or user.get("display_name") or user_id
+    try:
+        books = get_abs_books(user_id, scope)
+        with _status_cache_lock:
+            _status_cache[user_id] = {"books": books, "abs_ok": True, "ts": time.time()}
+        to_sync = []
+        with _last_synced_lock:
+            last = _last_synced.setdefault(user_id, {})
+            for b in books:
+                prev = last.get(b["title"], 0.0)
+                if b["is_finished"] or b["current_minutes"] - prev >= SYNC_THRESHOLD:
+                    to_sync.append(b)
+        if to_sync:
+            results = do_sync(user_id, to_sync)
+            with _last_synced_lock:
+                for b in to_sync:
+                    _last_synced[user_id][b["title"]] = b["current_minutes"]
+            synced = sum(1 for r in results if r["status"] == "success")
+            logger.info("[%s] Auto-sync: %d/%d synced", label, synced, len(to_sync))
+    except Exception as e:
+        logger.error("[%s] Auto-sync error: %s", label, e)
 
 
 def _poll_loop():
     logger.info("Auto-sync started: polling every %ds, threshold %.1f min", POLL_INTERVAL, SYNC_THRESHOLD)
     while True:
         time.sleep(POLL_INTERVAL)
-        if not all([cfg("ABS_URL"), cfg("ABS_TOKEN"), cfg("STORYGRAPH_SESSION")]):
-            continue
-        try:
-            books = get_abs_in_progress()
-            # update cache so UI shows fresh data after each poll
-            with _status_cache_lock:
-                _status_cache.update({"books": books, "abs_ok": True, "ts": time.time()})
-            to_sync = []
-            with _last_synced_lock:
-                for b in books:
-                    prev = _last_synced.get(b["title"], 0.0)
-                    if b["current_minutes"] - prev >= SYNC_THRESHOLD:
-                        logger.info("'%s' gained %.1f min — syncing", b["title"], b["current_minutes"] - prev)
-                        to_sync.append(b)
-            if to_sync:
-                results = do_sync(to_sync)
-                with _last_synced_lock:
-                    for b in to_sync:
-                        _last_synced[b["title"]] = b["current_minutes"]
-                synced = sum(1 for r in results if r["status"] == "success")
-                logger.info("Auto-sync: %d/%d synced", synced, len(to_sync))
-        except Exception as e:
-            logger.error("Auto-sync error: %s", e)
+        for user in list_users():
+            _poll_user(user)
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 app.secret_key = _get_secret_key()
 
+oauth = OAuth(app)
+if OIDC_ENABLED:
+    oauth.register(
+        name="oidc",
+        client_id=OIDC_CLIENT_ID,
+        client_secret=OIDC_CLIENT_SECRET,
+        server_metadata_url=f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid profile email"},
+    )
+
+PUBLIC_ENDPOINTS = {"login", "login_oidc", "auth_callback", "logout", "setup", "static"}
+
+
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not g.user or not g.user.get("is_admin"):
+            return jsonify({"error": "Forbidden"}), 403
+        return view(*args, **kwargs)
+    return wrapped
+
 
 @app.before_request
-def check_auth():
-    if not os.environ.get("UI_PASSWORD"):
-        return  # auth disabled
-    if request.endpoint in ("login", "logout", "static"):
+def load_user():
+    g.user = None
+    if request.endpoint == "static":
         return
-    if not session.get("authenticated"):
+    user_id = session.get("user_id")
+    if user_id:
+        g.user = get_user(user_id)
+        if g.user is None:
+            session.clear()
+    if not any_users_exist():
+        if request.endpoint != "setup":
+            return redirect(url_for("setup"))
+        return
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return
+    if g.user is None:
         return redirect(url_for("login"))
+
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    if any_users_exist():
+        return redirect(url_for("index"))
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        if not username or not password:
+            error = "Username and password are required."
+        else:
+            user = create_user(username=username, password=password, is_admin=True)
+            session["user_id"] = user["id"]
+            return redirect(url_for("index"))
+    return render_template("setup.html", error=error)
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    if not os.environ.get("UI_PASSWORD"):
+    if g.user:
         return redirect(url_for("index"))
     error = None
     if request.method == "POST":
-        username = os.environ.get("UI_USERNAME", "admin")
-        password = os.environ.get("UI_PASSWORD")
-        ok = (
-            hmac.compare_digest(request.form.get("username", ""), username)
-            and hmac.compare_digest(request.form.get("password", ""), password)
-        )
-        if ok:
-            session["authenticated"] = True
+        user = get_user_by_username(request.form.get("username", ""))
+        password = request.form.get("password", "")
+        if user and user.get("password_hash") and check_password_hash(user["password_hash"], password):
+            session["user_id"] = user["id"]
             return redirect(url_for("index"))
         error = "Invalid username or password."
-    return render_template("login.html", error=error)
+    return render_template("login.html", error=error, oidc_enabled=OIDC_ENABLED)
+
+
+@app.route("/login/oidc")
+def login_oidc():
+    if not OIDC_ENABLED:
+        return redirect(url_for("login"))
+    return oauth.oidc.authorize_redirect(url_for("auth_callback", _external=True))
+
+
+@app.route("/auth/callback")
+def auth_callback():
+    if not OIDC_ENABLED:
+        return redirect(url_for("login"))
+    token = oauth.oidc.authorize_access_token()
+    claims = token.get("userinfo") or oauth.oidc.userinfo(token=token)
+    sub = claims.get("sub")
+    if not sub:
+        return redirect(url_for("login"))
+    user = get_user_by_oidc_sub(sub)
+    if not user:
+        display_name = claims.get("preferred_username") or claims.get("email") or sub
+        user = create_user(oidc_sub=sub, display_name=display_name, is_admin=False)
+    session["user_id"] = user["id"]
+    return redirect(url_for("index"))
 
 
 @app.route("/logout")
@@ -374,22 +633,29 @@ def logout():
 
 @app.route("/")
 def index():
-    return render_template("index.html", auth_enabled=bool(os.environ.get("UI_PASSWORD")))
+    return render_template(
+        "index.html",
+        is_admin=bool(g.user.get("is_admin")),
+        display_name=g.user.get("display_name") or g.user.get("username"),
+    )
 
 
 @app.route("/api/status")
 def api_status():
+    user_id = g.user["id"]
+    scope = cfg(user_id, "SYNC_SCOPE", "in_progress")
     books, abs_ok = [], False
-    if cfg("ABS_URL") and cfg("ABS_TOKEN"):
-        books, abs_ok = get_cached_books()
+    if cfg(user_id, "ABS_URL") and cfg(user_id, "ABS_TOKEN"):
+        books, abs_ok = get_cached_books(user_id, scope)
     with _last_synced_lock:
-        last = dict(_last_synced)
+        last = dict(_last_synced.get(user_id, {}))
     return jsonify({
         "abs_ok": abs_ok,
-        "sg_ok": bool(cfg("STORYGRAPH_SESSION")),
+        "sg_ok": bool(cfg(user_id, "STORYGRAPH_SESSION")),
         "auto_sync": True,
         "poll_interval": POLL_INTERVAL,
         "sync_threshold": SYNC_THRESHOLD,
+        "sync_scope": scope,
         "books": books,
         "last_synced": last,
     })
@@ -397,17 +663,20 @@ def api_status():
 
 @app.route("/api/sync", methods=["POST"])
 def api_sync():
-    missing = [k for k in ("ABS_URL", "ABS_TOKEN", "STORYGRAPH_SESSION") if not cfg(k)]
+    user_id = g.user["id"]
+    missing = [k for k in ("ABS_URL", "ABS_TOKEN", "STORYGRAPH_SESSION") if not cfg(user_id, k)]
     if missing:
         return jsonify({"error": f"Missing: {', '.join(missing)}"}), 500
+    scope = cfg(user_id, "SYNC_SCOPE", "in_progress")
     try:
-        books = get_abs_in_progress()
+        books = get_abs_books(user_id, scope)
         if not books:
-            return jsonify({"message": "No books in progress", "synced": 0, "total": 0, "results": []})
-        results = do_sync(books)
+            return jsonify({"message": "No books found", "synced": 0, "total": 0, "results": []})
+        results = do_sync(user_id, books)
         with _last_synced_lock:
+            last = _last_synced.setdefault(user_id, {})
             for b in books:
-                _last_synced[b["title"]] = b["current_minutes"]
+                last[b["title"]] = b["current_minutes"]
         synced = sum(1 for r in results if r["status"] == "success")
         return jsonify({"message": "Sync complete", "synced": synced, "total": len(books), "results": results})
     except Exception as e:
@@ -416,43 +685,88 @@ def api_sync():
 
 
 @app.route("/api/logs")
+@admin_required
 def api_logs():
     return jsonify({"logs": _log_buffer.get()})
 
 
 @app.route("/api/settings", methods=["POST"])
 def api_settings():
+    user_id = g.user["id"]
     data = request.json or {}
-    allowed = {"ABS_URL", "ABS_TOKEN", "STORYGRAPH_SESSION", "STORYGRAPH_REMEMBER_TOKEN"}
+    allowed = {"ABS_URL", "ABS_TOKEN", "STORYGRAPH_SESSION", "STORYGRAPH_REMEMBER_TOKEN", "SYNC_SCOPE"}
     if "ABS_URL" in data and data["ABS_URL"]:
         parsed = urlparse(data["ABS_URL"])
         if parsed.scheme not in ("http", "https"):
             return jsonify({"error": "ABS_URL must use http or https"}), 400
         if not parsed.hostname:
             return jsonify({"error": "ABS_URL must include a hostname"}), 400
-    with _config_lock:
-        for k, v in data.items():
-            if k in allowed and v:
-                _runtime_config[k] = v
-        _save_file_config({k: v for k, v in _runtime_config.items() if k in allowed and v})
-    logger.info("Settings updated via UI")
+    if data.get("SYNC_SCOPE") and data["SYNC_SCOPE"] not in SYNC_SCOPES:
+        return jsonify({"error": "Invalid SYNC_SCOPE"}), 400
+    set_cfg(user_id, {k: v for k, v in data.items() if k in allowed})
+    logger.info("[%s] Settings updated via UI", g.user.get("username") or g.user.get("display_name") or user_id)
     return jsonify({"ok": True})
 
 
 @app.route("/api/settings", methods=["GET"])
 def api_settings_get():
     """Return current config keys (masked values) so the UI can show what's set."""
+    user_id = g.user["id"]
     return jsonify({
-        "ABS_URL": cfg("ABS_URL"),
-        "ABS_TOKEN": "set" if cfg("ABS_TOKEN") else "",
-        "STORYGRAPH_SESSION": "set" if cfg("STORYGRAPH_SESSION") else "",
-        "STORYGRAPH_REMEMBER_TOKEN": "set" if cfg("STORYGRAPH_REMEMBER_TOKEN") else "",
+        "ABS_URL": cfg(user_id, "ABS_URL"),
+        "ABS_TOKEN": "set" if cfg(user_id, "ABS_TOKEN") else "",
+        "STORYGRAPH_SESSION": "set" if cfg(user_id, "STORYGRAPH_SESSION") else "",
+        "STORYGRAPH_REMEMBER_TOKEN": "set" if cfg(user_id, "STORYGRAPH_REMEMBER_TOKEN") else "",
+        "SYNC_SCOPE": cfg(user_id, "SYNC_SCOPE", "in_progress"),
     })
 
 
+@app.route("/api/users")
+@admin_required
+def api_users():
+    users = [{
+        "id": u["id"],
+        "username": u.get("username"),
+        "display_name": u.get("display_name"),
+        "is_admin": bool(u.get("is_admin")),
+        "via_oidc": bool(u.get("oidc_sub")),
+    } for u in list_users()]
+    return jsonify({"users": users})
+
+
+@app.route("/api/users", methods=["POST"])
+@admin_required
+def api_create_user():
+    data = request.json or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not username or not password:
+        return jsonify({"error": "Username and password are required"}), 400
+    if get_user_by_username(username):
+        return jsonify({"error": "Username already taken"}), 400
+    user = create_user(username=username, password=password, is_admin=bool(data.get("is_admin")))
+    return jsonify({"id": user["id"]})
+
+
+@app.route("/api/users/<user_id>", methods=["DELETE"])
+@admin_required
+def api_delete_user(user_id):
+    if user_id == g.user["id"]:
+        return jsonify({"error": "Cannot delete your own account"}), 400
+    delete_user(user_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/users/<user_id>/admin", methods=["POST"])
+@admin_required
+def api_set_admin(user_id):
+    if user_id == g.user["id"]:
+        return jsonify({"error": "Cannot change your own admin status"}), 400
+    data = request.json or {}
+    update_user(user_id, is_admin=bool(data.get("is_admin")))
+    return jsonify({"ok": True})
+
+
 if __name__ == "__main__":
-    if all([cfg("ABS_URL"), cfg("ABS_TOKEN"), cfg("STORYGRAPH_SESSION")]):
-        threading.Thread(target=_poll_loop, daemon=True).start()
-    else:
-        logger.warning("Missing config — auto-sync disabled")
+    threading.Thread(target=_poll_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
