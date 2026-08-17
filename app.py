@@ -380,19 +380,21 @@ class StoryGraphClient:
         logger.warning("No StoryGraph result for '%s'", title)
         return None
 
-    def ensure_status(self, book_id, target_status):
+    def ensure_status(self, book_id, target_status) -> tuple[bool, bool]:
+        """Returns (ok, already_matched) — already_matched is True when the book's
+        StoryGraph status already matched target_status and nothing was posted."""
         resp = self._get(f"/books/{book_id}")
         m = re.search(r'class="read-status-label"[^>]*>([^<]+)<', resp.text)
         current = m.group(1).strip().lower() if m else ""
         label = _STATUS_LABELS[target_status]
         if label in current or (target_status == "currently-reading" and "rereading" in current):
-            return True
+            return True, True
         r = self._post(
             f"/update-status.js?book_id={book_id}&status={target_status}",
             {"authenticity_token": self._last_csrf},
         )
         logger.info("Set status=%s for %s: HTTP %s", target_status, book_id, r.status_code)
-        return r.status_code in (200, 302)
+        return r.status_code in (200, 302), False
 
     def update_progress(self, book_id, progress_percent) -> bool:
         resp = self._get(f"/books/{book_id}")
@@ -468,9 +470,10 @@ def do_sync(user_id: str, books: list[dict]) -> list[dict]:
             if not book_id:
                 results.append({"title": book["title"], "status": "not_found"})
                 continue
-            client.ensure_status(book_id, status)
-            ok = True
-            if status != "to-read":
+            ok, already_matched = client.ensure_status(book_id, status)
+            # Skip the progress POST for books that were already "read" on StoryGraph
+            # before this tool touched them — nothing changed, so don't write anything.
+            if status != "to-read" and not (status == "read" and already_matched):
                 ok = client.update_progress(book_id, 100 if status == "read" else pct)
             if ok:
                 synced[book["title"]] = {"pct": pct, "status": status}

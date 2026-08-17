@@ -413,7 +413,7 @@
   <!-- Currently Listening -->
   <div class="card">
     <div class="section-header">
-      <h2>Currently Listening</h2>
+      <h2 id="books-header">Currently Listening</h2>
       <button class="btn btn-primary" id="sync-btn" onclick="triggerSync()">
         <span id="sync-label">Sync Now</span>
       </button>
@@ -524,6 +524,12 @@
   let shownLogs = 0;
   let selectedScope = 'in_progress';
 
+  const SCOPE_HEADERS = {
+    in_progress: 'Currently Listening',
+    in_progress_finished: 'Currently Listening + Finished',
+    library: 'Library',
+  };
+
   document.querySelectorAll('.scope-btn').forEach(btn => {
     btn.onclick = () => {
       selectedScope = btn.dataset.scope;
@@ -540,6 +546,7 @@
       setDot('d-abs', 'l-abs', d.abs_ok, 'ABS');
       setDot('d-sg',  'l-sg',  d.sg_ok,  'StoryGraph');
       document.getElementById('l-poll').textContent = `Every ${d.poll_interval}s`;
+      document.getElementById('books-header').textContent = SCOPE_HEADERS[d.sync_scope] || 'Currently Listening';
 
       const grid = document.getElementById('books-grid');
       if (!d.books?.length) {
@@ -554,7 +561,7 @@
         return `
           <div class="book-card">
             <div class="book-meta">
-              <div class="book-title">${esc(b.title)}</div>
+              <div class="book-title">${esc(b.title)}${b.is_finished ? ' <span class="badge success">Finished</span>' : ''}</div>
               <div class="book-author">${esc(b.author)}</div>
             </div>
             <div class="progress-wrap">
