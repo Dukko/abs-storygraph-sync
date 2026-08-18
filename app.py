@@ -380,27 +380,48 @@ class StoryGraphClient:
         logger.warning("No StoryGraph result for '%s'", title)
         return None
 
-    def ensure_status(self, book_id, target_status) -> tuple[bool, bool]:
-        """Returns (ok, already_matched) — already_matched is True when the book's
-        StoryGraph status already matched target_status and nothing was posted."""
-        resp = self._get(f"/books/{book_id}")
-        m = re.search(r'class="read-status-label"[^>]*>([^<]+)<', resp.text)
+    def get_book_page(self, book_id) -> str:
+        return self._get(f"/books/{book_id}").text
+
+    def _parse_current_progress(self, html) -> float | None:
+        """Best-effort read of the percentage StoryGraph currently has on file for
+        this book, from the same hidden field update_progress() fills in. Returns
+        None if it can't be found — callers should treat that as 'unknown' and not
+        skip a write on its account."""
+        m = re.search(
+            r'(?:name="read_status\[progress_number\]"|class="read-status-progress-number")[^>]*value="([^"]*)"',
+            html,
+        )
+        if not m or not m.group(1):
+            return None
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+
+    def ensure_status(self, book_id, target_status, html: str | None = None) -> tuple[bool, bool, str | None]:
+        """Returns (ok, already_matched, html) — already_matched is True when the book's
+        StoryGraph status already matched target_status and nothing was posted. html is
+        the page markup the match was read from (reusable for a progress check), or None
+        if a status-changing POST was made and any previously-fetched markup is now stale."""
+        html = html if html is not None else self.get_book_page(book_id)
+        m = re.search(r'class="read-status-label"[^>]*>([^<]+)<', html)
         current = m.group(1).strip().lower() if m else ""
         label = _STATUS_LABELS[target_status]
         if label in current or (target_status == "currently-reading" and "rereading" in current):
-            return True, True
+            return True, True, html
         r = self._post(
             f"/update-status.js?book_id={book_id}&status={target_status}",
             {"authenticity_token": self._last_csrf},
         )
         logger.info("Set status=%s for %s: HTTP %s", target_status, book_id, r.status_code)
-        return r.status_code in (200, 302), False
+        return r.status_code in (200, 302), False, None
 
-    def update_progress(self, book_id, progress_percent) -> bool:
-        resp = self._get(f"/books/{book_id}")
+    def update_progress(self, book_id, progress_percent, html: str | None = None) -> bool:
+        html = html if html is not None else self.get_book_page(book_id)
         m = re.search(
             r'(?:name="read_status\[book_num_of_pages\]"|class="read-status-book-num-of-pages")[^>]*value="([^"]*)"',
-            resp.text,
+            html,
         )
         book_pages = m.group(1) if m else "0"
         r = self._post("/update-progress", {
@@ -470,11 +491,28 @@ def do_sync(user_id: str, books: list[dict]) -> list[dict]:
             if not book_id:
                 results.append({"title": book["title"], "status": "not_found"})
                 continue
-            ok, already_matched = client.ensure_status(book_id, status)
-            # Skip the progress POST for books that were already "read" on StoryGraph
-            # before this tool touched them — nothing changed, so don't write anything.
-            if status != "to-read" and not (status == "read" and already_matched):
-                ok = client.update_progress(book_id, 100 if status == "read" else pct)
+            ok, already_matched, status_html = client.ensure_status(book_id, status)
+            target_pct = 100 if status == "read" else pct
+            # Skip the progress POST when StoryGraph already agrees with us. "read" is
+            # always 100% by definition, so an already-matched read status is always
+            # safe to skip (this was the original fix for finished-book duplicates).
+            # For "currently reading" we can't assume that — the status label matching
+            # doesn't tell us the percentage matches too — so we additionally parse the
+            # progress StoryGraph has on file and only skip if it's already within
+            # rounding distance of what we'd post. Without this, a book that already
+            # matched (e.g. every "currently reading" book on a fresh install, before
+            # this tool has any local sync-state for it) still got a progress POST on
+            # every single poll, creating a spurious "started" entry and a duplicate
+            # progress update in the StoryGraph journal even though nothing about the
+            # book had actually changed. If we can't parse the current percentage at
+            # all, we conservatively still post — no worse than the old behavior.
+            current_pct = client._parse_current_progress(status_html or "") if already_matched else None
+            skip_progress = status == "to-read" or (
+                already_matched
+                and (status == "read" or (current_pct is not None and abs(current_pct - target_pct) < 0.5))
+            )
+            if not skip_progress:
+                ok = client.update_progress(book_id, target_pct, html=status_html)
             if ok:
                 synced[book["title"]] = {"pct": pct, "status": status}
                 _save_sync_state(user_id, synced)
