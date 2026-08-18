@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import requests as req
 from bs4 import BeautifulSoup
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 from authlib.integrations.flask_client import OAuth
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -28,6 +29,12 @@ OIDC_ISSUER = os.environ.get("OIDC_ISSUER")
 OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID")
 OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET")
 OIDC_ENABLED = bool(OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
+
+# Only used as a fallback when the reverse proxy's forwarded headers (picked up
+# automatically via ProxyFix below) aren't enough to get the right scheme/host —
+# e.g. an unusual proxy chain. Set to the externally-visible base URL, no
+# trailing slash: PUBLIC_URL=https://abs-sync.example.com
+PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
 
 SYNC_SCOPES = ("in_progress", "in_progress_finished", "library")
 
@@ -568,6 +575,17 @@ def _poll_loop():
 app = Flask(__name__)
 app.secret_key = _get_secret_key()
 
+# Trust one hop of X-Forwarded-Proto/Host/For/Prefix from a reverse proxy in
+# front of the container (Caddy, nginx, Traefik, ...). Without this, Flask has
+# no way to know the original request came in over https when the proxy talks
+# plain http to the container — so url_for(..., _external=True) (used to build
+# the OIDC redirect_uri sent to the provider) generates an http:// URL even
+# behind an https-terminating proxy, which providers like Google reject as a
+# redirect_uri mismatch. Setting the proxy's forwarded headers alone doesn't
+# fix this on its own — Flask/Werkzeug ignore them unless told to trust them,
+# which is what this does.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
 oauth = OAuth(app)
 if OIDC_ENABLED:
     oauth.register(
@@ -646,7 +664,8 @@ def login():
 def login_oidc():
     if not OIDC_ENABLED:
         return redirect(url_for("login"))
-    return oauth.oidc.authorize_redirect(url_for("auth_callback", _external=True))
+    redirect_uri = f"{PUBLIC_URL}/auth/callback" if PUBLIC_URL else url_for("auth_callback", _external=True)
+    return oauth.oidc.authorize_redirect(redirect_uri)
 
 
 @app.route("/auth/callback")

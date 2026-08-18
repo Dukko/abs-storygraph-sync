@@ -11,3 +11,6 @@ services:
       # OIDC_ISSUER: https://id.example.com
       # OIDC_CLIENT_ID: your_client_id
       # OIDC_CLIENT_SECRET: your_client_secret
+      # Only needed if you're behind HTTPS-terminating reverse proxy and OIDC
+      # redirect URIs still come out as http:// — see README's OIDC section
+      # PUBLIC_URL: https://abs-sync.example.com

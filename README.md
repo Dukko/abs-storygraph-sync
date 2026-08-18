@@ -68,8 +68,19 @@ Instance-wide environment variables (set once by whoever deploys the container):
 | `OIDC_ISSUER` | *(unset)* | Base URL of your OIDC provider (must expose `/.well-known/openid-configuration`) |
 | `OIDC_CLIENT_ID` | *(unset)* | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | *(unset)* | OIDC client secret |
+| `PUBLIC_URL` | *(unset)* | Externally-visible base URL, e.g. `https://abs-sync.example.com` (no trailing slash). Only needed if auto-detection below doesn't work for your setup |
 
 Everything else — ABS credentials, StoryGraph cookies, sync scope — is per-user, set through the web UI, no restart needed.
+
+### OIDC redirect URI
+
+When registering this app with your OIDC/OAuth provider (Google, PocketID, etc.), the redirect URI to configure is:
+
+```
+https://your-domain.example.com/auth/callback
+```
+
+The app is behind a plain HTTP `python app.py` process, so if you're reverse-proxying it over HTTPS (Caddy, nginx, Traefik, ...), it needs to know the request actually arrived over HTTPS in order to generate that redirect URI correctly when it talks to the provider — otherwise it'll send an `http://` redirect URI even though your proxy terminates TLS, and the provider will reject it as a mismatch. This is handled automatically as long as your reverse proxy forwards the standard `X-Forwarded-Proto`/`X-Forwarded-Host` headers (Caddy's `reverse_proxy` does this by default; other proxies may need it configured explicitly). If auto-detection still isn't giving the right URL for your setup, set `PUBLIC_URL` to force it.
 
 ## Sync scope
 
