@@ -239,6 +239,9 @@ def _abs_get(user_id: str, path: str, params: dict | None = None):
 
 
 def _item_to_book(item: dict, progress: dict) -> dict | None:
+    # StoryGraph is for books — skip ABS podcasts (and any non-book media).
+    if item.get("mediaType") and item.get("mediaType") != "book":
+        return None
     media = item.get("media", {})
     metadata = media.get("metadata", {})
     title = metadata.get("title", "").strip()
